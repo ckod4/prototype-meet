@@ -1,0 +1,15 @@
+{
+  "name": "prototype-meet-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Interface web de gestion des réunions à créneau",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "cookie-parser": "1.4.7",
+    "express": "4.21.2",
+    "zod": "3.25.76"
+  }
+}

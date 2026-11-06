@@ -234,12 +234,15 @@ app.get('/room-api/session/stream', asyncHandler(async (req, res) => {
 
 // Le créneau n'est pas encore ouvert : la page attend un changement de statut
 // sans boucle HTTP. Seuls les événements de calendrier sont exposés.
-app.get('/m/:token/events', requireUser, asyncHandler(async (req, res) => {
+app.get('/m/:token/events', asyncHandler(async (req, res) => {
   let resolved;
   try {
     resolved = await api.resolveAccess(req.params.token);
   } catch {
     return res.status(404).json({ error: 'Lien invalide' });
+  }
+  if (!res.locals.user && !isPublicParticipant(resolved.meeting, resolved.access)) {
+    return res.status(401).json({ error: 'Session web requise' });
   }
   const meetingId = resolved.meeting.id;
   sseHeaders(res);
@@ -367,12 +370,60 @@ function publicNameCookieName(token) {
   return `pmname_${sha256(token).slice(0, 20)}`;
 }
 
-function readPublicName(req, token, userId) {
+function anonymousCookieName(token) {
+  return `pmanon_${sha256(token).slice(0, 20)}`;
+}
+
+function anonymousIdentity(req, res, token, meeting) {
+  const raw = req.cookies?.[anonymousCookieName(token)];
+  const data = decryptJson(raw);
+  if (data
+    && data.tokenHash === sha256(token)
+    && typeof data.anonymous_id === 'string'
+    && /^anon-[0-9a-f-]{36}$/.test(data.anonymous_id)) {
+    return data.anonymous_id;
+  }
+  const anonymousId = `anon-${crypto.randomUUID()}`;
+  const ttl = Math.max(60_000, new Date(meeting.ends_at).getTime() - Date.now() + 3_600_000);
+  res.cookie(anonymousCookieName(token), encryptJson({
+    tokenHash: sha256(token),
+    anonymous_id: anonymousId,
+  }), {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: config.cookieSecure,
+    path: '/',
+    maxAge: ttl,
+  });
+  return anonymousId;
+}
+
+function linkIdentityKey(user, anonymousId) {
+  return user ? `user:${user.id}` : `anon:${anonymousId}`;
+}
+
+function readPublicName(req, token, identityKey, userId = null) {
   const raw = req.cookies?.[publicNameCookieName(token)];
   const data = decryptJson(raw);
-  if (!data || data.tokenHash !== sha256(token) || data.user_id !== userId) return '';
+  if (!data || data.tokenHash !== sha256(token)) return '';
+  const keyMatches = data.identity_key === identityKey
+    || (userId && data.user_id === userId);
+  if (!keyMatches) return '';
   const name = String(data.name || '').trim();
   return name.length >= 2 && name.length <= 80 ? name : '';
+}
+
+function isPublicParticipant(meeting, access) {
+  return access.role === 'participant' && Boolean(meeting.public_access);
+}
+
+function consentIdentityKey(req, res, token, meeting, access) {
+  if (access.role === 'organizer') return access.external_id || res.locals.user?.id || '';
+  if (access.kind === 'named') return access.external_id || res.locals.user?.id || '';
+  if (isPublicParticipant(meeting, access)) {
+    return res.locals.user?.id || anonymousIdentity(req, res, token, meeting);
+  }
+  return res.locals.user?.id || '';
 }
 
 function setMeetingSessionCookie(res, token, raw, meeting) {
@@ -700,10 +751,6 @@ app.post('/logout', (req, res) => {
 
 app.get('/m/:token', asyncHandler(async (req, res) => {
   const token = req.params.token;
-  if (!res.locals.user) {
-    const next = `/m/${encodeURIComponent(token)}`;
-    return res.redirect(`/login?next=${encodeURIComponent(next)}`);
-  }
 
   let resolved;
   try {
@@ -729,6 +776,10 @@ app.get('/m/:token', asyncHandler(async (req, res) => {
   }
 
   const { meeting, state, access } = resolved;
+  if (!res.locals.user && !isPublicParticipant(meeting, access)) {
+    const next = `/m/${encodeURIComponent(token)}`;
+    return res.redirect(`/login?next=${encodeURIComponent(next)}`);
+  }
   if (state.phase === 'cancelled') {
     return res.status(410).send(views.meetingTerminalPage({
       user: res.locals.user, csrf: res.locals.csrfToken,
@@ -750,7 +801,9 @@ app.get('/m/:token', asyncHandler(async (req, res) => {
   }
 
   const webMeeting = meetingByApiId(meeting.id);
-  const membership = webMeeting ? organizerMembership(webMeeting.id, res.locals.user.id) : null;
+  const membership = webMeeting && res.locals.user
+    ? organizerMembership(webMeeting.id, res.locals.user.id)
+    : null;
 
   if (access.role === 'organizer') {
     const accountMatches = access.external_id && access.external_id === res.locals.user.id;
@@ -776,18 +829,23 @@ app.get('/m/:token', asyncHandler(async (req, res) => {
 
   let identity;
   if (access.kind === 'generic') {
-    if (meeting.public_access && access.role === 'participant') {
-      const publicName = readPublicName(req, token, res.locals.user.id);
+    if (isPublicParticipant(meeting, access)) {
+      const anonymousId = res.locals.user ? null : anonymousIdentity(req, res, token, meeting);
+      const identityKey = linkIdentityKey(res.locals.user, anonymousId);
+      const publicName = readPublicName(req, token, identityKey, res.locals.user?.id);
       if (!publicName) {
         return res.send(views.meetingPublicNamePage({
           user: res.locals.user,
           csrf: res.locals.csrfToken,
           meeting,
           token,
-          suggestedName: res.locals.user.name,
+          suggestedName: res.locals.user?.name || '',
         }));
       }
-      identity = { display_name: publicName, external_id: res.locals.user.id };
+      identity = {
+        display_name: publicName,
+        external_id: res.locals.user ? res.locals.user.id : anonymousId,
+      };
     } else {
       identity = { display_name: res.locals.user.name, external_id: res.locals.user.id };
     }
@@ -797,7 +855,7 @@ app.get('/m/:token', asyncHandler(async (req, res) => {
 
   // Le consentement à l'enregistrement appartient au consommateur de l'API.
   // L'API n'en sait rien ; la salle affiche ensuite l'indicateur d'enregistrement.
-  if (meeting.recording && !hasRecordingConsent(meeting.id, res.locals.user.id)) {
+  if (meeting.recording && !hasRecordingConsent(meeting.id, identity.external_id)) {
     return res.send(views.meetingConsentPage({
       user: res.locals.user,
       csrf: res.locals.csrfToken,
@@ -860,7 +918,7 @@ app.get('/m/:token', asyncHandler(async (req, res) => {
   }));
 }));
 
-app.post('/m/:token/name', requireUser, asyncHandler(async (req, res) => {
+app.post('/m/:token/name', asyncHandler(async (req, res) => {
   const token = req.params.token;
   let resolved;
   try {
@@ -869,9 +927,14 @@ app.post('/m/:token/name', requireUser, asyncHandler(async (req, res) => {
     return renderError(res, { status: 404, title: 'Lien invalide', message: error.message });
   }
   const { meeting, access, state } = resolved;
+  if (!res.locals.user && !isPublicParticipant(meeting, access)) {
+    return res.redirect(`/login?next=${encodeURIComponent(`/m/${token}`)}`);
+  }
   if (access.role !== 'participant' || access.kind !== 'generic' || !meeting.public_access || state.phase !== 'open') {
     return renderError(res, { status: 403, title: 'Nom non modifiable', message: "Ce lien ne permet pas de saisir un nom public." });
   }
+  const anonymousId = res.locals.user ? null : anonymousIdentity(req, res, token, meeting);
+  const identityKey = linkIdentityKey(res.locals.user, anonymousId);
   const name = String(req.body.display_name || '').trim();
   if (name.length < 2 || name.length > 80) {
     return res.status(422).send(views.meetingPublicNamePage({
@@ -879,12 +942,17 @@ app.post('/m/:token/name', requireUser, asyncHandler(async (req, res) => {
       csrf: res.locals.csrfToken,
       meeting,
       token,
-      suggestedName: name || res.locals.user.name,
+      suggestedName: name || res.locals.user?.name || '',
       error: 'Le nom doit contenir entre 2 et 80 caractères.',
     }));
   }
   const ttl = Math.max(60_000, new Date(meeting.ends_at).getTime() - Date.now() + 3_600_000);
-  res.cookie(publicNameCookieName(token), encryptJson({ tokenHash: sha256(token), name, user_id: res.locals.user.id }), {
+  res.cookie(publicNameCookieName(token), encryptJson({
+    tokenHash: sha256(token),
+    name,
+    identity_key: identityKey,
+    user_id: res.locals.user?.id || null,
+  }), {
     httpOnly: true,
     sameSite: 'lax',
     secure: config.cookieSecure,
@@ -894,7 +962,7 @@ app.post('/m/:token/name', requireUser, asyncHandler(async (req, res) => {
   return res.redirect(`/m/${encodeURIComponent(token)}`);
 }));
 
-app.post('/m/:token/consent', requireUser, asyncHandler(async (req, res) => {
+app.post('/m/:token/consent', asyncHandler(async (req, res) => {
   const token = req.params.token;
   let resolved;
   try {
@@ -902,10 +970,18 @@ app.post('/m/:token/consent', requireUser, asyncHandler(async (req, res) => {
   } catch (error) {
     return renderError(res, { status: 404, title: 'Lien invalide', message: error.message });
   }
-  if (!resolved.meeting.recording) {
+  const { meeting, access } = resolved;
+  if (!res.locals.user && !isPublicParticipant(meeting, access)) {
+    return res.redirect(`/login?next=${encodeURIComponent(`/m/${token}`)}`);
+  }
+  if (!meeting.recording) {
     return res.redirect(303, `/m/${encodeURIComponent(token)}`);
   }
-  recordRecordingConsent(resolved.meeting.id, res.locals.user.id);
+  const identityKey = consentIdentityKey(req, res, token, meeting, access);
+  if (!identityKey) {
+    return renderError(res, { status: 403, title: 'Consentement impossible', message: "Identité de réunion indisponible." });
+  }
+  recordRecordingConsent(meeting.id, identityKey);
   return res.redirect(303, `/m/${encodeURIComponent(token)}`);
 }));
 

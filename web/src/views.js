@@ -560,7 +560,7 @@ function meetingWaitingPage({ user, csrf, meeting, state }) {
           <div><span>Créneau</span><strong>${parisTime(state.starts_at)} - ${parisTime(state.ends_at)}</strong></div>
           <div><span>Durée</span><strong>${formatDuration((new Date(state.ends_at) - new Date(state.starts_at)) / 1000)}</strong></div>
         </div>
-        <p class="muted small">L'ouverture se fait automatiquement à l'heure prévue. Vous êtes connecté, aucune nouvelle authentification ne sera demandée.</p>
+        <p class="muted small">L'ouverture se fait automatiquement à l'heure prévue. ${user ? 'Vous êtes connecté, aucune nouvelle authentification ne sera demandée.' : "Aucune connexion n'est nécessaire pour cette réunion publique."}</p>
       </main>
       <script src="/static/waiting.js"></script>`,
   });
@@ -585,7 +585,9 @@ function meetingPublicNamePage({ user, csrf, meeting, token, suggestedName = '',
           </label>
           <button class="button" type="submit">Continuer vers la réunion</button>
         </form>
-        <p class="muted small">Votre compte web reste associé à cette présence. Le nom choisi est utilisé pour cette réunion.</p>
+        <p class="muted small">${user
+          ? 'Votre compte web reste associé à cette présence. Le nom choisi est utilisé pour cette réunion.'
+          : 'Vous rejoignez cette réunion publique sans compte. Le nom choisi reste associé à cette réunion dans ce navigateur.'}</p>
       </main>`,
   });
 }
@@ -660,7 +662,7 @@ function meetingTerminalPage({ user, csrf, eyebrow, title, meeting, message, ton
           <div><span>Créneau</span><strong>${parisTime(meeting.starts_at)} - ${parisTime(meeting.ends_at)}</strong></div>
           <div><span>Date</span><strong>${escapeHtml(parisDateTime(meeting.starts_at))}</strong></div>
         </div>` : ''}
-        <div class="form-actions"><a class="button" href="/dashboard">Retour à mes réunions</a></div>
+        <div class="form-actions"><a class="button" href="${user ? '/dashboard' : '/'}">${user ? 'Retour à mes réunions' : 'Fermer'}</a></div>
       </main>`,
   });
 }

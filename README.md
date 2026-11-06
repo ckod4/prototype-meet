@@ -24,8 +24,8 @@ Parcours utilisateur :
 
 1. Ouvrir http://localhost:3090, créer un compte puis se connecter.
 2. Créer une réunion, choisir le créneau et activer éventuellement l'enregistrement, la transcription, le chat, l'accès public et la salle d'attente.
-3. Conserver le lien organisateur secret, réserver aux comptes organisateurs. Ajouter d'autres organisateurs par e-mail. Partager le lien participant : chaque participant doit avoir un compte web.
-4. Sans session dans le navigateur, un lien redirige vers la connexion puis revient automatiquement sur la réunion. Avec une session, le lien ouvre directement la salle, même dans un nouvel onglet.
+3. Conserver le lien organisateur secret, réservé aux comptes organisateurs. Ajouter d'autres organisateurs par e-mail. Partager le lien participant : une réunion publique s'ouvre sans compte.
+4. Une réunion privée redirige vers la connexion puis revient automatiquement sur la réunion. Une réunion publique avec un lien participant s'ouvre directement, sans connexion. Avec une session existante, le lien ouvre directement la salle, même dans un nouvel onglet.
 5. Retrouver dans la fiche de la réunion la présence, le chat, l'enregistrement et les transcriptions dès qu'ils sont produits.
 
 Enregistrement et transcription :
@@ -89,7 +89,7 @@ Le projet web est un service Node séparé, exposé sur le port 3090. Il consomm
 - Téléchargement des artefacts via une URL présignée courte, après contrôle de propriété. Suppression définitive possible par un organisateur.
 - Enregistrement géré par le serveur : il démarre automatiquement dès qu'un participant consenti a rejoint une réunion avec enregistrement activé.
 - Toutes les vues de réunion sont dans le web : attente, salle, réunion terminée, réunion annulée, capacité atteinte.
-- Tout lien de réunion exige une session web. Sans session : redirection vers `/login` avec retour automatique sur le lien. Avec session : accès direct, y compris dans un nouvel onglet.
+- Un lien participant de réunion publique ne demande aucune session web. Un lien de réunion privée ou un lien organisateur redirige vers `/login` avec retour automatique sur le lien. Avec session : accès direct, y compris dans un nouvel onglet.
 - La salle web intègre l'iframe Jitsi et conserve la logique de fin de créneau, le chat, la capture audio et les événements de présence.
 - Le web entretient un abonnement SSE persistant vers `/api/v1/events/stream`. Les changements d'admission, de présence, de médias, de chat, d'enregistrement et de fin de réunion arrivent par ce flux, sans boucle d'interrogation. L'API conserve un journal d'événements rejouable après redémarrage. Seul un heartbeat de présence toutes les 30 s reste envoyé par la salle pour maintenir la vivacité de la session ; il ne demande aucun événement.
 - L'API ne sert aucune page, aucun formulaire et aucun asset : uniquement du JSON, des URL présignées et des flux d'événements.
@@ -109,12 +109,14 @@ L'API conserve son propre modèle : une seule clé maître, aucune session utili
 
 ## Accès public
 
-Le mode public est un booléen de réunion, activé à la création ou modifiable par un organisateur. Il ne supprime pas l'authentification web, conformément à la règle d'accès précédente.
+Le mode public est un booléen de réunion, activé à la création ou modifiable par un organisateur.
 
-- Réunion privée : le lien participant générique utilise le nom et l'identifiant du compte connecté.
-- Réunion publique : le lien participant générique demande un nom affiché avant l'entrée. Le nom est conservé pour cette réunion via un cookie chiffré, lié au compte.
-- Les liens participants nominatifs conservent toujours le nom inscrit dans le jeton.
-- Un organisateur qui ouvre un lien participant est toujours basculé vers son lien organisateur avant l'étape du nom public.
+- Réunion privée : le lien participant exige une session web. Le lien générique utilise le nom et l'identifiant du compte connecté.
+- Réunion publique : aucun compte ni connexion n'est demandé pour un lien participant. Le lien générique demande un nom affiché, conservé pour cette réunion via un cookie chiffré. Un identifiant anonyme aléatoire et signé est créé pour ce navigateur et ce lien ; il sert d'`external_id` à l'API.
+- Les liens participants nominatifs d'une réunion publique utilisent le nom et l'identifiant inscrits dans le jeton, sans connexion.
+- Le lien organisateur exige toujours une connexion et reste lié au compte organisateur nominatif.
+- Un organisateur connecté qui ouvre un lien participant est toujours basculé vers son lien organisateur avant l'étape du nom public.
+- Un visiteur anonyme exclu ne peut pas revenir avec le même cookie. Effacer le cookie ou changer de navigateur crée une nouvelle identité anonyme ; l'exclusion définitive forte repose sur les liens nominatifs et les comptes web.
 
 ## Salle d'attente
 
@@ -163,7 +165,7 @@ Navigateur du créateur
 
 Navigateur participant
   └── projet web A ou B /m/{jeton}
-        ├── session web requise, retour automatique après connexion
+        ├── session web pour le privé et l'organisateur, accès direct en public
         ├── vues attente / consentement / salle / terminée / annulée
         ├── iframe Jitsi https://meet.localhost:9443  (JWT court, rôle du lien)
         ├── SSE navigateur pour admission, médias, modération et fin
@@ -225,13 +227,13 @@ Une réunion terminée ne peut plus être modifiée. Les durées acceptées vont
 | Participant nominatif | `/m/{jeton}` sur le web | Participant, nom et `external_id` figés par le lien |
 | Participant générique | `/m/{jeton}` sur le web | Participant avec le nom du compte, ou nom demandé si la réunion est publique |
 
-Tous les liens de réunion passent par le projet web. Sans session web, redirection vers la connexion avec retour automatique sur le lien. Une session déjà présente dans le navigateur ouvre directement la salle, même dans un nouvel onglet.
+Tous les liens de réunion passent par le projet web. Un lien participant de réunion publique s'ouvre sans session web. Un lien de réunion privée ou un lien organisateur redirige vers la connexion avec retour automatique sur le lien. Une session déjà présente dans le navigateur ouvre directement la salle, même dans un nouvel onglet.
 
 Les jetons font 256 bits aléatoires (`crypto.randomBytes(32)`), sont hachés SHA-256 en base et ne sont jamais dérivés du nom de salle, de l'identifiant de réunion ou d'un autre lien. Plusieurs organisateurs disposent chacun d'un lien nominatif. L'API ne génère aucune URL : elle renvoie uniquement des jetons. Chaque projet web décide de sa route, ici `/m/{jeton}`. Un jeton créé par un projet web fonctionne sur un autre projet web connecté à la même API, à condition que l'utilisateur y possède un compte et que le lien organisateur corresponde à son identifiant.
 
 Un organisateur qui ouvre un lien participant est redirigé vers son propre lien organisateur avant toute création de session. Si son lien est indisponible, il reçoit une erreur, jamais une session participante. Les sessions participante actives du même identifiant sont fermées quand il rejoint en organisateur.
 
-La salle Jitsi a un nom aléatoire (`pm` + 12 octets hexadécimaux). Sans JWT valide, Jitsi refuse la connexion (`ENABLE_AUTH=1`, `AUTH_TYPE=jwt`, `JWT_ALLOW_EMPTY=0`). Le navigateur ne reçoit le JWT et le nom de salle qu'après authentification web et résolution du lien. Une URL de réunion inventée ou modifiée ne correspond à aucun jeton en base : elle renvoie 404, ne crée aucune session et n'ouvre aucune salle. Le rôle, la réunion et le créneau sont revérifiés côté API à chaque résolution, jointure, changement de statut et action de modération.
+La salle Jitsi a un nom aléatoire (`pm` + 12 octets hexadécimaux). Sans JWT valide, Jitsi refuse la connexion (`ENABLE_AUTH=1`, `AUTH_TYPE=jwt`, `JWT_ALLOW_EMPTY=0`). Le navigateur ne reçoit le JWT et le nom de salle qu'après résolution du lien et, pour une réunion privée ou un lien organisateur, authentification web. Une URL de réunion inventée ou modifiée ne correspond à aucun jeton en base : elle renvoie 404, ne crée aucune session et n'ouvre aucune salle. Le rôle, la réunion et le créneau sont revérifiés côté API à chaque résolution, jointure, changement de statut et action de modération.
 
 ## API
 
@@ -436,7 +438,8 @@ Variables principales :
 - Interface web : mots de passe scrypt, sessions HttpOnly, CSRF, contrôle de propriété, jetons organisateur/participant chiffrés AES-256-GCM, consentement à l'enregistrement. La clé maître reste côté serveur et n'apparaît dans aucune page.
 - Inscription ouverte dans ce MVP. Pour une mise en production, ajouter vérification d'e-mail, limitation de débit, récupération de mot de passe et éventuellement une liste d'invitation.
 - Jetons de liens aléatoires 256 bits, hachés en base, routés séparément. Un participant ne peut pas déduire le lien organisateur du sien.
-- Tous les liens de réunion exigent une session web. Le paramètre `next` est limité aux chemins `/m/{jeton}` pour éviter les redirections ouvertes.
+- Les liens participants de réunion publique sont accessibles sans session web. Les liens de réunion privée et les liens organisateur restent protégés par la session web. Le paramètre `next` est limité aux chemins `/m/{jeton}` pour éviter les redirections ouvertes.
+- Un visiteur public anonyme reçoit un identifiant aléatoire chiffré dans un cookie HttpOnly. Il sert d'`external_id` stable pour la session de réunion et l'exclusion, sans créer de compte côté API.
 - Les liens organisateurs sont liés au compte nominatif et à une ligne organisateur active. Un lien volé reste inutilisable par un autre compte.
 - L'admission en salle d'attente est refusée côté API sans organisateur connecté. Les participants en attente n'obtiennent aucun JWT.
 - Le web conserve un cookie de session de réunion par jeton, HttpOnly, pour réutiliser la même présence lors d'un rechargement ou d'un nouvel onglet du même navigateur.
@@ -463,7 +466,7 @@ Variables principales :
 8. **Branding Jitsi** : les interfaces applicatives sont brandées par `.env`. Le watermark Jitsi natif dans l'iframe n'est pas remplacé par un logo client dans ce MVP.
 9. **SQLite** : adapté au prototype mono-instance. Pas de haute disponibilité.
 10. **Authentification web** : inscription ouverte, pas de vérification d'e-mail ni de récupération de mot de passe. Les liens sont conservés chiffrés dans la base web : si `WEB_ENCRYPTION_KEY` ou cette base est perdue, l'API ne peut pas régénérer les liens existants.
-11. **Participants** : aucun accès anonyme. Chaque participant doit créer ou utiliser un compte web. Le lien générique utilise le nom et l'identifiant du compte connecté ; le lien nominatif conserve l'identité inscrite dans le jeton.
+11. **Participants** : une réunion privée exige un compte web. Une réunion publique accepte les participants anonymes via un identifiant de navigateur chiffré ; l'exclusion anonyme est contournable en effaçant le cookie ou en changeant de navigateur. Le lien nominatif conserve l'identité inscrite dans le jeton.
 12. **API directe** : elle reste utilisable avec la clé maître pour les tests et intégrations. Les projets web sont les seuls composants à utiliser cette clé côté serveur ; le navigateur ne la reçoit jamais. L'API ne sert aucune page et retourne uniquement du JSON, des artefacts signés et des flux SSE.
 13. **Invitations** : aucun e-mail n'est envoyé par le prototype. L'invitation par adresse crée un lien dès que le compte existe ou s'inscrit. L'adresse n'est pas vérifiée, ce qui suppose une inscription de confiance.
 14. **Enregistrement** : un seul Jibri sur ce nœud, donc une seule réunion enregistrée à la fois. L'enregistrement démarre au premier participant admis, pas avant. Jibri réel non exécuté dans cet environnement ; le pilotage HTTP a été validé avec un faux Jibri.
@@ -480,6 +483,7 @@ Variables principales :
 - Accès sans session : redirection vers la connexion avec `next`. Connexion ou inscription : retour automatique sur le lien. Session déjà présente : accès direct à la salle, sans redirection, y compris dans un second onglet.
 - Salle web : iframe Jitsi chargée dans le web, événements de présence et captures audio transmis par le proxy web ; un client Chrome headless a rejoint la réunion avec le nom de l'organisateur.
 - Lien participant générique : identité reprise du compte web connecté ; présence enregistrée avec cet identifiant.
+- Réunion publique anonyme : accès sans session web, formulaire de nom, consentement, salle et lobby testés sans compte. Le serveur enregistre un `external_id` anonyme stable dans un cookie chiffré. Une réunion privée avec le même type de lien redirige toujours vers `/login`.
 - Présence : événement `joined`, passage de la réunion à `in_progress`, total de temps calculé.
 - Capture audio : chunks Opus reçus par l'API et stockés par session, y compris deux chunks successifs transmis via le proxy web.
 - S3 : bucket créé, artefacts `attendance` et `chat` téléversés, URL présignée 900 s, suppression, ancienne URL en 404, nouvelle demande en 404.

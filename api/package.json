@@ -9,8 +9,8 @@
     "dev": "node --watch src/server.js"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "3.879.0",
-    "@aws-sdk/s3-request-presigner": "3.879.0",
+    "@aws-sdk/client-s3": "3.1166.0",
+    "@aws-sdk/s3-request-presigner": "3.1166.0",
     "cookie-parser": "1.4.7",
     "express": "4.21.2",
     "jose": "6.1.0",
